@@ -6,61 +6,89 @@ on:
     branches: master
 
 jobs:
-  matrices:
+  setup:
     name: Define CI matrix
     runs-on: ubuntu-latest
     strategy:
       matrix:
         cfg:
           - data:
-            - name: ubuntu-20.04
-              tier: 1
-              platform: Ubuntu 20.04
-              build_os: ubuntu-20.04-8cores
-              test_os: ubuntu-20.04
+              - name: ubuntu-20.04
+                tier: 1
+                platform: Ubuntu 20.04
+                build_os: ubuntu-20.04-8cores
+                test_os: ubuntu-20.04
+                host: x86_64-pc-linux-gnu
 
-            - name: ubuntu-22.04
-              tier: 3
-              platform: Ubuntu 22.04
-              build_os: ubuntu-22.04-8cores
-              test_os: ubuntu-22.04
+              - name: ubuntu-22.04
+                tier: 3
+                platform: Ubuntu 22.04
+                build_os: ubuntu-22.04-8cores
+                test_os: ubuntu-22.04
+                host: x86_64-pc-linux-gnu
 
-            - name: macos-11
-              tier: 3
-              platform: macOS Big Sur 11
-              build_os: macos-11
-              test_os: macos-11
-              brew_deps: >
-                autoconf
-                automake
-                coreutils
-                libtool
-                pkgconfig
+              - name: macos-11
+                tier: 3
+                platform: macOS Big Sur 11
+                build_os: macos-11
+                test_os: macos-11
+                brew_deps: >
+                  autoconf
+                  automake
+                  coreutils
+                  libtool
+                  pkgconfig
+                host: x86_64-apple-darwin
 
-            - name: mingw32
-              tier: 3
-              platform: Windows (64-bit MinGW)
-              build_os: ubuntu-22.04-8cores
-              test_os: windows-latest
-              cross_deps: >
-                mingw-w64
-              host: HOST=x86_64-w64-mingw32
-              file_ext: ".exe"
+              - name: mingw32
+                tier: 3
+                platform: Windows (64-bit MinGW)
+                build_os: ubuntu-22.04-8cores
+                test_os: windows-latest
+                cross_deps: >
+                  mingw-w64
+                host: x86_64-w64-mingw32
+                file_ext: ".exe"
 
-            - name: aarch64-linux
-              tier: 3
-              platform: ARM64 Linux
-              build_os: ubuntu-22.04-8cores
-              cross_deps: >
-                g++-aarch64-linux-gnu
-              host: HOST=aarch64-linux-gnu
+              - name: aarch64-linux
+                tier: 3
+                platform: ARM64 Linux
+                build_os: ubuntu-22.04-8cores
+                cross_deps: >
+                  g++-aarch64-linux-gnu
+                host: aarch64-linux-gnu
 
     outputs:
-      build_matrix: ${{ steps.set-matrices.outputs.build_matrix }}
-      test_matrix: ${{ steps.set-matrices.outputs.test_matrix }}
-      test_names: ${{ steps.set-matrices.outputs.test_names }}
+      build_matrix: ${{ steps.set-setup.outputs.build_matrix }}
+      test_matrix: ${{ steps.set-setup.outputs.test_matrix }}
+      test_names: ${{ steps.set-setup.outputs.test_names }}
+      rpc_tests: ${{ steps.set-rpc-tests.outputs.rpc_tests }}
+
     steps:
-      - id: set-matrices
+      - uses: actions/checkout@v4
+
+      - id: set-rpc-tests
+        run: |
+          cat <<EOF > ./subclass.py
+          import subprocess
+          import importlib
+          import sys
+          import os
+          sys.path.append('qa/pull-tester')
+          rpc_tests = importlib.import_module('rpc-tests')
+
+          src_dir = os.environ["SRC_DIR"]
+          build_dir = '.'
+          exeext = ''
+
+          test_list = rpc_tests.SERIAL_SCRIPTS + rpc_tests.BASE_SCRIPTS + rpc_tests.ZMQ_SCRIPTS
+          print(test_list)
+          EOF
+          RPC_LIST=$(SRC_DIR=$(pwd) python3 ./subclass.py)
+          RPC_LIST_JSON=$(echo "$RPC_LIST" | sed "s/'/\"/g" | jq -c .)
+          echo "rpc_tests=$RPC_LIST_JSON" >> $GITHUB_OUTPUT
+
+      - id: set-setup
         env:
           CFG: ${{ toJSON(matrix.cfg) }}
         run: |
@@ -68,14 +96,27 @@ jobs:
           jq -r -n 'env.CFG | fromjson | [.data[] | select(.test_os)] | @json "test_matrix=\(.)"' >> $GITHUB_OUTPUT
           jq -r -n 'env.CFG | fromjson | [.data[] | select(.test_os) | .name] | @json "test_names=\(.)"' >> $GITHUB_OUTPUT
 
+      - name: download sprout-groth16.params
+        run: |
+          mkdir zcash-params
+          cd zcash-params
+          wget -c https://download.z.cash/downloads/sprout-groth16.params
+
+      - uses: actions/cache/save@v3
+        name: cache-zcash-params
+        with:
+          enableCrossOsArchive: true
+          path: zcash-params
+          key: zcash-params
+
   build:
     name: Build tier ${{ matrix.tier }} platform ${{ matrix.platform }}
-    needs: matrices
+    needs: setup
     runs-on: ${{ matrix.build_os }}
     continue-on-error: ${{ matrix.tier == 3 }}
     strategy:
       matrix:
-        include: ${{ fromJson(needs.matrices.outputs.build_matrix) }}
+        include: ${{ fromJson(needs.setup.outputs.build_matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -97,6 +138,7 @@ jobs:
       - name: Cache built dependencies
         uses: actions/cache@v3
         with:
+          enableCrossOsArchive: true
           path: depends/built
           key: ${{ matrix.name }}-built-${{ hashFiles('depends/Makefile', 'depends/funcs.mk') }}-${{ hashFiles('depends/packages/*.mk', 'depends/patches/**/*') }}
           restore-keys: |
@@ -110,6 +152,7 @@ jobs:
       - name: Cache ccache files
         uses: actions/cache@v3
         with:
+          enableCrossOsArchive: true
           path: ${{ runner.os == 'macOS' && '~/Library/Caches/ccache' || '~/.cache/ccache' }}
           key: ${{ matrix.name }}-ccache-${{ steps.ccache_cache_timestamp.outputs.timestamp }}
           restore-keys: |
@@ -123,40 +166,107 @@ jobs:
       - name: Build zcashd
         id: build
         run: >
-          ${{ matrix.host }}
+          HOST=${{ matrix.host }}
           ./zcutil/build.sh
           -j"${{ steps.nproc.outputs.count }}"
 
-      - name: Upload zcashd artifact
-        uses: actions/upload-artifact@v3
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
-          name: zcashd-${{ matrix.name }}
-          path: |
-            ${{ format('src/zcash-cli{0}', matrix.file_ext) }}
-            ${{ format('src/zcashd{0}', matrix.file_ext) }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Upload zcash-btest artifact
-        if: matrix.test_os != ''
-        uses: actions/upload-artifact@v3
+      - name: Upload depends/${{ matrix.host }}/src/test/buildenv.py
+        uses: google-github-actions/upload-cloud-storage@v2
         with:
-          name: zcash-btest-${{ matrix.name }}
-          path: ${{ format('src/test/test_bitcoin{0}', matrix.file_ext) }}
+          path: ./src/test/buildenv.py
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src/test
+
+      - name: Upload depends/${{ matrix.host }}/src/secp256k1
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./src/secp256k1
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src
+
+      - name: Upload depends/${{ matrix.host }}/src/univalue
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./src/univalue
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src
+
+      - name: Upload depends/${{ matrix.host }}/native/bin
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./depends/${{ matrix.host }}/native/bin
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/depends/${{ matrix.host }}/native
+
+      - name: Upload depends/${{ matrix.host }}/native/lib
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./depends/${{ matrix.host }}/native/lib
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/depends/${{ matrix.host }}/native
+
+      - name: Upload depends/${{ matrix.host }}/lib
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./depends/${{ matrix.host }}/lib
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/depends/${{ matrix.host }}
+
+      - name: Upload src/bench/bench_bitcoin artifact
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./${{ format('src/bench/bench_bitcoin{0}', matrix.file_ext) }}
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src/bench
+
+      - name: Upload src/zcash-inspect artifact
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./${{ format('src/zcash-inspect{0}', matrix.file_ext) }}
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src
+
+      - name: Upload zcashd-wallet-tool artifact
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./${{ format('src/zcashd-wallet-tool{0}', matrix.file_ext) }}
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src
+
+      - name: Upload zcash-tx artifact
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./${{ format('src/zcash-tx{0}', matrix.file_ext) }}
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src
 
       - name: Upload zcash-gtest artifact
-        if: matrix.test_os != ''
-        uses: actions/upload-artifact@v3
+        uses: google-github-actions/upload-cloud-storage@v2
         with:
-          name: zcash-gtest-${{ matrix.name }}
-          path: ${{ format('src/zcash-gtest{0}', matrix.file_ext) }}
+          path: ./${{ format('src/zcash-gtest{0}', matrix.file_ext) }}
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src
+
+      - name: Upload zcash-btest artifact
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./${{ format('src/test/test_bitcoin{0}', matrix.file_ext) }}
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src/test
+
+      - name: Upload zcashd artifact
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./${{ format('src/zcashd{0}', matrix.file_ext) }}
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src
+
+      - name: Upload zcash-cli artifact
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: ./${{ format('src/zcash-cli{0}', matrix.file_ext) }}
+          destination: gh-zcash/${{ github.run_id }}/${{ matrix.name }}/src
 
   bitrot:
     name: Bitrot check tier ${{ matrix.tier }} platform ${{ matrix.platform }}
-    needs: [matrices, build]
+    needs: [setup, build]
     runs-on: ${{ matrix.build_os }}
     continue-on-error: ${{ matrix.tier == 3 }}
     strategy:
       matrix:
-        include: ${{ fromJson(needs.matrices.outputs.build_matrix) }}
+        include: ${{ fromJson(needs.setup.outputs.build_matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -178,6 +288,7 @@ jobs:
       - name: Cache built dependencies
         uses: actions/cache@v3
         with:
+          enableCrossOsArchive: true
           path: depends/built
           key: ${{ matrix.name }}-built-${{ hashFiles('depends/Makefile', 'depends/funcs.mk') }}-${{ hashFiles('depends/packages/*.mk', 'depends/patches/**/*') }}
           restore-keys: |
@@ -191,6 +302,7 @@ jobs:
       - name: Cache ccache files
         uses: actions/cache@v3
         with:
+          enableCrossOsArchive: true
           path: ${{ runner.os == 'macOS' && '~/Library/Caches/ccache' || '~/.cache/ccache' }}
           key: ${{ matrix.name }}-ccache-${{ steps.ccache_cache_timestamp.outputs.timestamp }}
           restore-keys: |
@@ -204,81 +316,486 @@ jobs:
       - name: Build zcashd with libraries enabled
         run: >
           CONFIGURE_FLAGS="--with-libs"
-          ${{ matrix.host }}
+          HOST=${{ matrix.host }}
           ./zcutil/build.sh
           -j"${{ steps.nproc.outputs.count }}"
 
       - name: Build zcashd with wallet disabled
         run: >
           CONFIGURE_FLAGS="--disable-wallet"
-          ${{ matrix.host }}
+          HOST=${{ matrix.host }}
           ./zcutil/build.sh
           -j"${{ steps.nproc.outputs.count }}"
 
       - name: Build zcashd with mining disabled
         run: >
           CONFIGURE_FLAGS="--disable-mining"
-          ${{ matrix.host }}
+          HOST=${{ matrix.host }}
           ./zcutil/build.sh
           -j"${{ steps.nproc.outputs.count }}"
 
   test-btest:
     name: Boost.Test tier ${{ matrix.tier }} platform ${{ matrix.platform }}
-    needs: [matrices, build]
+    needs: [setup, build]
     runs-on: ${{ matrix.test_os }}
     continue-on-error: ${{ matrix.tier != 1 }}
     strategy:
       matrix:
-        include: ${{ fromJson(needs.matrices.outputs.test_matrix) }}
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
     steps:
-      - name: Download zcash-btest artifact
-        uses: actions/download-artifact@v3
+      - uses: actions/checkout@v4
+      - name: "Set up Cloud SDK"
+        if: runner.os != 'Linux'
+        uses: "google-github-actions/setup-gcloud@v2"
         with:
-          name: zcash-btest-${{ matrix.name }}
+          version: ">= 363.0.0"
+
+      - name: Download artifact
+        shell: bash
+        run: |
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/test/test_bitcoin{0}', matrix.file_ext) }} ./src/test/
+          ls -la
+          ls -la src/test/
+          pwd
+
       - name: Make artifact executable
         if: runner.os != 'Windows'
-        run: chmod +x ${{ format('./test_bitcoin{0}', matrix.file_ext) }}
+        run: chmod +x ${{ format('./src/test/test_bitcoin{0}', matrix.file_ext) }}
+
       - name: Run Boost.Tests
-        run: ${{ format('./test_bitcoin{0}', matrix.file_ext) }} -p
+        shell: bash
+        run: |
+          ${{ format('./src/test/test_bitcoin{0}', matrix.file_ext) }} -p
 
   test-gtest:
     name: GoogleTest tier ${{ matrix.tier }} platform ${{ matrix.platform }} - shard ${{ matrix.gtest_shards }}
-    needs: [matrices, build]
+    needs: [setup, build]
     runs-on: ${{ matrix.test_os }}
     continue-on-error: ${{ matrix.tier != 1 }}
     strategy:
       matrix:
-        name: ${{ fromJson(needs.matrices.outputs.test_names) }}
+        name: ${{ fromJson(needs.setup.outputs.test_names) }}
         shard_index: [0, 1]
-        include: ${{ fromJson(needs.matrices.outputs.test_matrix) }}
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
     steps:
-      - name: Download zcash-gtest artifact
-        uses: actions/download-artifact@v3
+      - uses: actions/checkout@v4
+
+      - name: "Set up Cloud SDK"
+        if: runner.os != 'Linux'
+        uses: "google-github-actions/setup-gcloud@v2"
         with:
-          name: zcash-gtest-${{ matrix.name }}
+          version: ">= 363.0.0"
+
+
+      - name: Download artifact
+        shell: bash
+        run: |
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcash-gtest{0}', matrix.file_ext) }} ./
+
       - name: Make artifact executable
         if: runner.os != 'Windows'
         run: chmod +x ${{ format('./zcash-gtest{0}', matrix.file_ext) }}
-      - name: Get environment variables
-        id: env
+
+      - name: Get Sprout parameters
+        uses: actions/cache/restore@v3
+        with:
+          enableCrossOsArchive: true
+          path: zcash-params
+          key: zcash-params
+
+      - name: Setup zcash-params
         shell: bash
         run: |
-          echo "appdata=$APPDATA" >> "$GITHUB_OUTPUT"
-          echo "home=$HOME" >> "$GITHUB_OUTPUT"
-      - name: Download Sprout parameters
-        uses: carlosperate/download-file-action@v2.0.1
-        with:
-          file-url: "https://download.z.cash/downloads/sprout-groth16.params"
-          location: >
-            ${{
-              runner.os == 'Windows' && steps.env.outputs.appdata || steps.env.outputs.home
-            }}${{
-              runner.os == 'macOS' && '/Library/Application Support/' || '/'
-            }}${{
-              runner.os == 'Linux' && '.zcash-params' || 'ZcashParams'
-            }}
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            mv zcash-params "$APPDATA/ZcashParams"
+          elif [ "${{ runner.os }}" == "macOS" ]; then
+            mv zcash-params "$HOME/Library/Application Support/ZcashParams"
+          elif [ "${{ runner.os }}" == "Linux" ]; then
+            mv zcash-params "$HOME/.zcash-params"
+          fi
+
       - name: Run GoogleTests
+        shell: bash
         env:
           GTEST_TOTAL_SHARDS: 2
           GTEST_SHARD_INDEX: ${{ matrix.shard_index }}
         run: ${{ format('./zcash-gtest{0}', matrix.file_ext) }}
+
+# not designed for Windows # (disabled to save costs)
+  univalue:
+    name: univalue tier ${{ matrix.tier }} platform ${{ matrix.platform }}
+    needs: [setup, build]
+    runs-on: ${{ matrix.test_os }}
+    continue-on-error: ${{ matrix.tier != 1 }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: runner.os != 'Windows' # (disabled to save costs)
+
+      - name: 'Set up Cloud SDK'
+        if: runner.os != 'Linux' && runner.os != 'Windows' # (disabled to save costs)
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          version: '>= 363.0.0'
+
+
+      - name: Download artifact
+        shell: bash
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: |
+         ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} depends/${{ matrix.host }}/native/bin ./depends/${{ matrix.host }}/native/
+
+         ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} src/univalue ./src/
+
+      - name: Make artifact executable
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x ./src/univalue/build-aux/install-sh
+
+      - name: Run univalue test
+        shell: bash
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: >
+          SRC_DIR=$(pwd)
+          HOST=${{ matrix.host }}
+          python3 ./qa/zcash/full_test_suite.py univalue
+
+# not designed for Windows # (disabled to save costs)
+  secp256k1:
+    name: secp256k1 tier ${{ matrix.tier }} platform ${{ matrix.platform }}
+    needs: [setup, build]
+    runs-on: ${{ matrix.test_os }}
+    continue-on-error: ${{ matrix.tier != 1 }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: runner.os != 'Windows' # (disabled to save costs)
+
+      - name: 'Set up Cloud SDK'
+        if: runner.os != 'Linux' && runner.os != 'Windows' # (disabled to save costs)
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          version: '>= 363.0.0'
+
+
+      - name: Download artifact
+        shell: bash
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: |
+         ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} depends/${{ matrix.host }}/native/bin ./depends/${{ matrix.host }}/native/
+
+         ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} src/secp256k1 ./src/
+
+      - name: Run secp256k1 test
+        shell: bash
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: >
+          SRC_DIR=$(pwd)
+          HOST=${{ matrix.host }}
+          python3 ./qa/zcash/full_test_suite.py secp256k1
+
+# not designed for Windows # (disabled to save costs)
+  util-test:
+    name: util-test tier ${{ matrix.tier }} platform ${{ matrix.platform }}
+    needs: [setup, build]
+    runs-on: ${{ matrix.test_os }}
+    continue-on-error: ${{ matrix.tier != 1 }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: runner.os != 'Windows' # (disabled to save costs)
+
+      - name: 'Set up Cloud SDK'
+        if: runner.os != 'Linux' && runner.os != 'Windows' # (disabled to save costs)
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          version: '>= 363.0.0'
+
+
+      - name: Download artifact
+        shell: bash
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: |
+         ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcash-tx{0}', matrix.file_ext) }} ./src/
+
+         ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} src/test/buildenv.py ./src/test/
+
+      - name: Make artifact executable
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: |
+          chmod +x ${{ format('./src/zcash-tx{0}', matrix.file_ext) }}
+
+      - name: Run util-test test
+        shell: bash
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: >
+          SRC_DIR=$(pwd)
+          HOST=${{ matrix.host }}
+          python3 ./qa/zcash/full_test_suite.py util-test
+
+# not designed for Windows # (disabled to save costs)
+  no-dot-so:
+    name: not-dot-so tier ${{ matrix.tier }} platform ${{ matrix.platform }}
+    needs: [setup, build]
+    runs-on: ${{ matrix.test_os }}
+    continue-on-error: ${{ matrix.tier != 1 }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: runner.os != 'Windows' # (disabled to save costs)
+
+      - name: 'Set up Cloud SDK'
+        if: runner.os != 'Linux' && runner.os != 'Windows'
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          version: '>= 363.0.0'
+
+
+      - name: Download artifact
+        if: runner.os != 'Windows' # (disabled to save costs)
+        shell: bash
+        run: |
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} depends/${{ matrix.host }}/lib ./depends/${{ matrix.host }}/
+        
+      - name: Run no-dot-so test
+        if: runner.os != 'Windows' # (disabled to save costs)
+        shell: bash
+        run: >
+          SRC_DIR=$(pwd)
+          HOST=${{ matrix.host }}
+          python3 ./qa/zcash/full_test_suite.py no-dot-so
+
+# Not designed for Windows # (disabled to save costs)
+  rust-test:
+    name: rust-test tier ${{ matrix.tier }} platform ${{ matrix.platform }}
+    needs: [setup, build]
+    runs-on: ${{ matrix.test_os }}
+    continue-on-error: ${{ matrix.tier != 1 }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: runner.os != 'Windows' # (disabled to save costs)
+
+      - name: 'Set up Cloud SDK'
+        if: runner.os != 'Linux' && runner.os != 'Windows' # (disabled to save costs)
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          version: '>= 363.0.0'
+
+
+      - name: Download artifact
+        if: runner.os != 'Windows' # (disabled to save costs)
+        shell: bash
+        run: |
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} depends/${{ matrix.host }}/native/lib ./depends/${{ matrix.host }}/native/
+
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} depends/${{ matrix.host }}/native/bin ./depends/${{ matrix.host }}/native/
+        
+      - name: Make artifact executable
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: |
+          chmod +x ./depends/${{ matrix.host }}/native/bin/rustc
+          chmod +x ./depends/${{ matrix.host }}/native/bin/cargo
+
+      - name: Run rust-test test
+        if: runner.os != 'Windows' # (disabled to save costs)
+        shell: bash
+        run: >
+          SRC_DIR=$(pwd)
+          HOST=${{ matrix.host }}
+          python3 ./qa/zcash/full_test_suite.py rust-test
+
+# not working in Windows (disabled to save costs)
+  test-sec-hard:
+    name: sec-hard tier ${{ matrix.tier }} platform ${{ matrix.platform }}
+    needs: [setup, build]
+    runs-on: ${{ matrix.test_os }}
+    continue-on-error: ${{ matrix.tier != 1 }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: runner.os != 'Windows' # (disabled to save costs)
+
+      - name: 'Set up Cloud SDK'
+        if: runner.os != 'Linux' && runner.os != 'Windows' # (disabled to save costs)
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          version: '>= 363.0.0'
+
+      - name: Download artifact
+        if: runner.os != 'Windows' # (disabled to save costs)
+        shell: bash
+        run: |
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcash-inspect{0}', matrix.file_ext) }} ./src/
+
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/bench/bench_bitcoin{0}', matrix.file_ext) }} ./src/bench/
+
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/test/test_bitcoin{0}', matrix.file_ext) }} ./src/test/
+
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcashd-wallet-tool{0}', matrix.file_ext) }} ./src/
+
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcash-tx{0}', matrix.file_ext) }} ./src/
+
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcash-gtest{0}', matrix.file_ext) }} ./src/
+
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcashd{0}', matrix.file_ext) }} ./src/
+
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcash-cli{0}', matrix.file_ext) }} ./src/
+          
+      - name: Make artifact executable
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: |
+          chmod +x ${{ format('./src/test/test_bitcoin{0}', matrix.file_ext) }}
+          chmod +x ${{ format('./src/bench/bench_bitcoin{0}', matrix.file_ext) }}
+          chmod +x ${{ format('./src/zcashd{0}', matrix.file_ext) }}
+          chmod +x ${{ format('./src/zcash-cli{0}', matrix.file_ext) }}
+          chmod +x ${{ format('./src/zcash-gtest{0}', matrix.file_ext) }}
+          chmod +x ${{ format('./src/zcashd-wallet-tool{0}', matrix.file_ext) }}
+          chmod +x ${{ format('./src/zcash-tx{0}', matrix.file_ext) }}
+
+      - name: Run sec-hard test
+        shell: bash
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: >
+          SRC_DIR=$(pwd)
+          HOST=${{ matrix.host }}
+          python3 ./qa/zcash/full_test_suite.py sec-hard
+
+# not working in Windows (disabled to save costs)
+  rpc-depends:
+    name: RPC set up tier ${{ matrix.tier }} platform ${{ matrix.platform }}
+    needs: [setup, build]
+    runs-on: ${{ matrix.build_os }}
+    continue-on-error: ${{ matrix.tier != 1 }}
+    strategy:
+      matrix:
+        name: ${{ fromJson(needs.setup.outputs.test_names) }}
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
+
+    steps:
+      - name: get python depends
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: |
+          python3 -m venv ./venv
+          source ./venv/bin/activate
+          pip install simplejson zmq asyncio
+
+      - uses: actions/cache/save@v3
+        if: runner.os != 'Windows' # (disabled to save costs)
+        name: cache-venv
+        with:
+          enableCrossOsArchive: true
+          path: venv
+          key: venv-${{ matrix.name }}
+
+  rpc-test:
+    name: RPC tests tier ${{ matrix.tier }} platform ${{ matrix.platform }} test ${{ matrix.rpc_tests }}
+    needs: [setup, build, rpc-depends]
+    runs-on: ${{ matrix.build_os }}
+    continue-on-error: ${{ matrix.tier != 1 }}
+    strategy:
+      matrix:
+        name: ${{ fromJson(needs.setup.outputs.test_names) }}
+        rpc_tests : ${{ fromJson(needs.setup.outputs.rpc_tests) }}
+        include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: runner.os != 'Windows' # (disabled to save costs)
+
+      - uses: actions/cache/restore@v3
+        name: cache-zcash-params
+        if: runner.os != 'Windows' # (disabled to save costs)
+        with:
+          enableCrossOsArchive: true
+          path: zcash-params
+          key: zcash-params
+
+      - uses: actions/cache/restore@v3
+        if: runner.os != 'Windows' # (disabled to save costs)
+        name: cache-venv
+        with:
+          enableCrossOsArchive: true
+          path: venv
+          key: venv-${{ matrix.name }}
+
+      - name: 'Set up Cloud SDK'
+        if: runner.os != 'Linux' && runner.os != 'Windows' # (disabled to save costs)
+        uses: 'google-github-actions/setup-gcloud@v2'
+
+
+      - name: Download artifact
+        if: runner.os != 'Windows' # (disabled to save costs)
+        shell: bash
+        run: |
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcashd{0}', matrix.file_ext) }} ./src/
+
+          ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcash-cli{0}', matrix.file_ext) }} ./src/
+
+      - name: Make artifact executable
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x ${{ format('./src/zcashd{0}', matrix.file_ext) }}
+          chmod +x ${{ format('./src/zcash-cli{0}', matrix.file_ext) }}
+
+      - name: Get Sprout parameters
+        if: runner.os != 'Windows' # (disabled to save costs)
+        uses: actions/cache/restore@v3
+        with:
+          enableCrossOsArchive: true
+          path: zcash-params
+          key: zcash-params
+
+      - name: Setup zcash-params
+        if: runner.os != 'Windows' # (disabled to save costs)
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            mv zcash-params "$APPDATA/ZcashParams"
+          elif [ "${{ runner.os }}" == "macOS" ]; then
+            mv zcash-params "$HOME/Library/Application Support/ZcashParams"
+          elif [ "${{ runner.os }}" == "Linux" ]; then
+            mv zcash-params "$HOME/.zcash-params"
+          fi
+
+      - name: RPC test ${{ matrix.rpc_tests }}
+        if: runner.os != 'Windows' # (disabled to save costs)
+        run: |
+          cat <<EOF > ./subclass.py
+          import subprocess
+          import importlib
+          import sys
+          import os
+          sys.path.append('qa/pull-tester')
+          rpc_tests = importlib.import_module('rpc-tests')
+          
+          src_dir = os.environ["SRC_DIR"]
+          build_dir = '.'
+          exeext = ''
+          
+          class MyTestHandler(rpc_tests.RPCTestHandler):
+              def start_test(self, args, stdout, stderr):
+                  return subprocess.Popen(
+                      args,
+                      universal_newlines=True,
+                      stdout=stdout,
+                      stderr=stderr)
+          
+          test_list = ["${{ matrix.rpc_tests }}"]
+          all_passed = rpc_tests.run_tests(MyTestHandler, test_list, src_dir, build_dir, exeext, jobs=len(test_list))
+          if all_passed == False:
+              sys.exit(1)
+          EOF
+          source ./venv/bin/activate
+          ZCASHD=$(pwd)/${{ format('src/zcashd{0}', matrix.file_ext) }} SRC_DIR=$(pwd) python3 ./subclass.py
