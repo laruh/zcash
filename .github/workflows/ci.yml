@@ -686,14 +686,14 @@ jobs:
 
     steps:
       - name: get python depends
-        if: runner.os != 'Windows' && # (disabled to save costs)
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         run: |
           python3 -m venv ./venv
           source ./venv/bin/activate
           pip install simplejson zmq asyncio
 
       - uses: actions/cache/save@v3
-        if: runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         name: cache-venv
         with:
           enableCrossOsArchive: true
