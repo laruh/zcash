@@ -673,7 +673,7 @@ jobs:
           HOST=${{ matrix.host }}
           python3 ./qa/zcash/full_test_suite.py sec-hard
 
-# not working in Windows (disabled to save costs)
+# not working in Windows (disabled to save costs) and disabling in MacOS to save costs
   rpc-depends:
     name: RPC set up tier ${{ matrix.tier }} platform ${{ matrix.platform }}
     needs: [setup, build]
@@ -686,7 +686,7 @@ jobs:
 
     steps:
       - name: get python depends
-        if: runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Windows' && # (disabled to save costs)
         run: |
           python3 -m venv ./venv
           source ./venv/bin/activate
@@ -700,6 +700,7 @@ jobs:
           path: venv
           key: venv-${{ matrix.name }}
 
+# not working in Windows (disabled to save costs) and disabling in MacOS to save costs
   rpc-test:
     name: RPC tests tier ${{ matrix.tier }} platform ${{ matrix.platform }} test ${{ matrix.rpc_tests }}
     needs: [setup, build, rpc-depends]
@@ -712,18 +713,18 @@ jobs:
         include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
     steps:
       - uses: actions/checkout@v4
-        if: runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
 
       - uses: actions/cache/restore@v3
         name: cache-zcash-params
-        if: runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         with:
           enableCrossOsArchive: true
           path: zcash-params
           key: zcash-params
 
       - uses: actions/cache/restore@v3
-        if: runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         name: cache-venv
         with:
           enableCrossOsArchive: true
@@ -731,12 +732,12 @@ jobs:
           key: venv-${{ matrix.name }}
 
       - name: 'Set up Cloud SDK'
-        if: runner.os != 'Linux' && runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Linux' && runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         uses: 'google-github-actions/setup-gcloud@v2'
 
 
       - name: Download artifact
-        if: runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         shell: bash
         run: |
           ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcashd{0}', matrix.file_ext) }} ./src/
@@ -744,13 +745,13 @@ jobs:
           ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} ${{ format('src/zcash-cli{0}', matrix.file_ext) }} ./src/
 
       - name: Make artifact executable
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         run: |
           chmod +x ${{ format('./src/zcashd{0}', matrix.file_ext) }}
           chmod +x ${{ format('./src/zcash-cli{0}', matrix.file_ext) }}
 
       - name: Get Sprout parameters
-        if: runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         uses: actions/cache/restore@v3
         with:
           enableCrossOsArchive: true
@@ -758,7 +759,7 @@ jobs:
           key: zcash-params
 
       - name: Setup zcash-params
-        if: runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         shell: bash
         run: |
           if [ "${{ runner.os }}" == "Windows" ]; then
@@ -770,7 +771,7 @@ jobs:
           fi
 
       - name: RPC test ${{ matrix.rpc_tests }}
-        if: runner.os != 'Windows' # (disabled to save costs)
+        if: runner.os != 'Windows' && runner.os != 'macOS' # (disabled to save costs)
         run: |
           cat <<EOF > ./subclass.py
           import subprocess
