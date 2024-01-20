@@ -539,7 +539,6 @@ jobs:
           HOST=${{ matrix.host }}
           python3 ./qa/zcash/full_test_suite.py util-test
 
-# not designed for Windows # (disabled to save costs)
   no-dot-so:
     name: not-dot-so tier ${{ matrix.tier }} platform ${{ matrix.platform }}
     needs: [setup, build]
@@ -550,23 +549,20 @@ jobs:
         include: ${{ fromJson(needs.setup.outputs.test_matrix) }}
     steps:
       - uses: actions/checkout@v4
-        if: runner.os != 'Windows' # (disabled to save costs)
 
       - name: 'Set up Cloud SDK'
-        if: runner.os != 'Linux' && runner.os != 'Windows'
+        if: runner.os != 'Linux'
         uses: 'google-github-actions/setup-gcloud@v2'
         with:
           version: '>= 363.0.0'
 
 
       - name: Download artifact
-        if: runner.os != 'Windows' # (disabled to save costs)
         shell: bash
         run: |
           ./.github/gcs-download-artifacts.sh ${{ secrets.GCP_SA_KEY }} ${{ github.run_id }}/${{ matrix.name }} depends/${{ matrix.host }}/lib ./depends/${{ matrix.host }}/
         
       - name: Run no-dot-so test
-        if: runner.os != 'Windows' # (disabled to save costs)
         shell: bash
         run: >
           SRC_DIR=$(pwd)
