@@ -61,7 +61,8 @@ jobs:
     outputs:
       build_matrix: ${{ steps.set-setup.outputs.build_matrix }}
       test_matrix: ${{ steps.set-setup.outputs.test_matrix }}
-      rpc_test_matrix: ${{ steps.set-setup.outputs.rpc_tests }}
+      rpc_test_matrix: ${{ steps.set-setup.outputs.rpc_test_matrix }}
+      rpc_test_names: ${{ steps.set-setup.outputs.rpc_test_names }}
       test_names: ${{ steps.set-setup.outputs.test_names }}
       rpc_tests: ${{ steps.set-rpc-tests.outputs.rpc_tests }}
 
@@ -94,9 +95,10 @@ jobs:
           CFG: ${{ toJSON(matrix.cfg) }}
         run: |
           jq -r -n 'env.CFG | fromjson | @json "build_matrix=\(.data)"' >> $GITHUB_OUTPUT
-          jq -r -n 'env.CFG | fromjson | [.data[] | select(.test_os and .tier == 1)] | @json "rpc_test_matrix=\(.)"' >> $GITHUB_OUTPUT
           jq -r -n 'env.CFG | fromjson | [.data[] | select(.test_os)] | @json "test_matrix=\(.)"' >> $GITHUB_OUTPUT
           jq -r -n 'env.CFG | fromjson | [.data[] | select(.test_os) | .name] | @json "test_names=\(.)"' >> $GITHUB_OUTPUT
+          jq -r -n 'env.CFG | fromjson | [.data[] | select(.test_os and .tier == 1) | .name] | @json "rpc_test_names=\(.)"' >> $GITHUB_OUTPUT
+          jq -r -n 'env.CFG | fromjson | [.data[] | select(.test_os and .tier == 1)] | @json "rpc_test_matrix=\(.)"' >> $GITHUB_OUTPUT
 
       - name: download sprout-groth16.params
         run: |
@@ -706,7 +708,7 @@ jobs:
     continue-on-error: ${{ matrix.tier != 1 }}
     strategy:
       matrix:
-        name: ${{ fromJson(needs.setup.outputs.test_names) }}
+        name: ${{ fromJson(needs.setup.outputs.rpc_test_names) }}
         rpc_tests : ${{ fromJson(needs.setup.outputs.rpc_tests) }}
         include: ${{ fromJson(needs.setup.outputs.rpc_test_matrix) }}
     steps:
